@@ -6,17 +6,40 @@
 
 #include "textflag.h"
 
-// TODO(minux): this is only valid for ARMv6+
-// func armcas(ptr *int32, old int32, new int32) bool
-// Atomically:
-//	if *ptr == old {
-//		*ptr = new
-//		return true
-//	} else {
-//		return false
-//	}
+// func Cas(ptr *int32, old int32, new int32) bool
+// On ARMv6+ we use LDREX/STREX (via armcas).
+// On ARMv5 (single-core, no LDREX) we disable interrupts to get
+// atomicity, which is safe because non-linux GOARM<7 targets are
+// defined as single-processor only (see comment below).
 TEXT	·Cas(SB),NOSPLIT,$0
+#ifdef GOARM_6
 	JMP	·armcas(SB)
+#else
+	MOVW	ptr+0(FP), R1
+	MOVW	old+4(FP), R2
+	MOVW	new+8(FP), R3
+
+	// Disable IRQ+FIQ, save old CPSR in R4.
+	WORD	$0xe10f4000	// mrs r4, CPSR
+	WORD	$0xe38400c0	// orr r0, r4, #0xc0
+	WORD	$0xe121f000	// msr CPSR_c, r0
+
+	MOVW	(R1), R0
+	CMP	R0, R2
+	BNE	casfailv5
+
+	MOVW	R3, (R1)
+	// Restore CPSR (re-enables interrupts if they were enabled).
+	WORD	$0xe121f004	// msr CPSR_c, r4
+	MOVW	$1, R0
+	MOVB	R0, ret+12(FP)
+	RET
+casfailv5:
+	WORD	$0xe121f004	// msr CPSR_c, r4
+	MOVW	$0, R0
+	MOVB	R0, ret+12(FP)
+	RET
+#endif
 
 // Non-linux OSes support only single processor machines before ARMv7.
 // So we don't need memory barriers if goarm < 7. And we fail loud at
